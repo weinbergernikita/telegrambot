@@ -19,8 +19,9 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /home/deploy/telegrambot  # Перейти в папку проекта
-            echo "123" >>  /home/deploy/telegrambot/test3.txt
+            chmod +x start_bot.sh
+            /home/deploy/telegrambot/start_bot.sh
 #            git pull telegrambot main     # Стянуть последние изменения
 #            docker compose down      # Остановить старые контейнеры
 #            docker compose up -d --build  # Пересобрать и запустить новые
-#            docker image prune -f    # (Опционально) Удалить старые образы
+#            docker image prune -f    # (Опционально) Удалить старые образы 
