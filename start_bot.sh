@@ -1,4 +1,4 @@
 #!/bin/bash
-cd /opt/telegram-bot
-source /opt/telegram-bot/venv/bin/activate
+cd /home/deploy/telegrambot
+source /home/deploy/telegrambot/venv/bin/activate
 python bot.py
