@@ -19,6 +19,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             git pull telegrambot main &&
+            echo "123" >> test.txt
             cd /home/deploy/telegrambot  # Перейти в папку проекта
             chmod +x start_bot.sh
             ./start_bot.sh
