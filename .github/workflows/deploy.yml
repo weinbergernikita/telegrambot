@@ -18,11 +18,11 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            git pull telegrambot main &&
-            echo "234" >> test.txt
-            cd /home/deploy/telegrambot  # Перейти в папку проекта
-            chmod +x start_bot.sh
-            ./start_bot.sh
+             cd /home/deploy/telegrambot/
+             git pull telegrambot main
+             systemctl stop servicebot.service
+             systemctl daemon-reload
+             systemctl start servicebot.service
 #            git pull telegrambot main     # Стянуть последние изменения
 #            docker compose down      # Остановить старые контейнеры
 #            docker compose up -d --build  # Пересобрать и запустить новые
