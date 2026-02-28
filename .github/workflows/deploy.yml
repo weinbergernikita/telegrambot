@@ -18,9 +18,10 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-             source /home/deploy/.bashrc
-             cd /home/deploy/telegrambot/
-             git pull telegrambot main
+              git clone https://github.com/weinbergernikita/telegrambot.git
+#             source /home/deploy/.bashrc
+#             cd /home/deploy/telegrambot/
+#             git pull telegrambot main
              systemctl stop servicebot.service
              systemctl daemon-reload
              systemctl start servicebot.service
