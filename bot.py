@@ -274,8 +274,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 f"{status_emoji(new_status)} **Статус заявки №{request_id} изменён!**\n\nНовый статус: **{new_status}**",
                 parse_mode="Markdown"
             )
-        except Exception as e:
-            logger.error(f"Не удалось уведомить клиента: {e}")
+            except Exception as e:
+                logger.error(f"Не удалось уведомить клиента: {e}")
 
     # Показать обновлённое управление заявкой
         req = get_request_by_id(request_id)  # обновляем данные
