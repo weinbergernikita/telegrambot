@@ -49,7 +49,7 @@ def validate_phone(phone):
 def get_main_menu():
     """Главное меню"""
     buttons = [
-        [InlineKeyboardButton("🆘 Сочная жопа Ольги", callback_data="create")],
+        [InlineKeyboardButton("🆘 Создать заявку", callback_data="create")],
         [InlineKeyboardButton("📞 Контакты", callback_data="contacts")],
         [InlineKeyboardButton("💰 Цены", callback_data="prices")]
     ]
