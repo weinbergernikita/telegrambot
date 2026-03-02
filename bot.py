@@ -1,73 +1,257 @@
 #!/usr/bin/env python3
-#telegrambot
 import logging
 import os
+import sqlite3
 import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, 
+    MessageHandler, ContextTypes, filters
+)
 
-# Загружаем переменные из .env файла
+# ========== НАСТРОЙКА ==========
 load_dotenv()
 
-# Получаем настройки из окружения
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
-
-# Преобразуем ADMIN_ID в число, так как из .env приходит строка
 if ADMIN_ID:
     ADMIN_ID = int(ADMIN_ID)
 
-# ========== НАСТРОЙКИ ==========
+# Настройки базы данных
+DATABASE_NAME = "service_bot.db"
+REQUESTS_PER_PAGE = 5
+
+# Логирование
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Проверка наличия обязательных настроек
+# Проверка токена
 if not TOKEN:
-    logger.error("❌ BOT_TOKEN не найден! Проверьте файл .env")
+    logger.error("❌ BOT_TOKEN не найден!")
     raise ValueError("BOT_TOKEN не настроен")
 
-if not ADMIN_ID:
-    logger.warning("⚠️ ADMIN_ID не настроен! Заявки не будут отправляться администратору")
+# ========== БАЗА ДАННЫХ ==========
+def get_connection():
+    """Создает соединение с БД"""
+    conn = sqlite3.connect(DATABASE_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# ========= ХРАНЕНИЕ ДАННЫХ ==========
-user_data = {}
+def init_database():
+    """Инициализация базы данных"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS repair_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                client_name TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                problem_type TEXT NOT NULL,
+                problem_description TEXT NOT NULL,
+                status TEXT DEFAULT 'Новая',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+    logger.info("✅ База данных инициализирована")
+
+def add_request(user_id, username, client_name, phone, problem_type, problem_description):
+    """Добавление новой заявки"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO repair_requests 
+            (user_id, username, client_name, phone, problem_type, problem_description)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, username, client_name, phone, problem_type, problem_description))
+        conn.commit()
+        return cursor.lastrowid
+
+def get_user_requests(user_id):
+    """Получение заявок пользователя"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, problem_type, problem_description, status, created_at
+            FROM repair_requests
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+        ''', (user_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+def get_all_requests():
+    """Получение всех заявок"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM repair_requests ORDER BY created_at DESC')
+        return [dict(row) for row in cursor.fetchall()]
+
+def get_requests_by_status(status):
+    """Получение заявок по статусу"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM repair_requests
+            WHERE status = ?
+            ORDER BY created_at DESC
+        ''', (status,))
+        return [dict(row) for row in cursor.fetchall()]
+
+def get_request_by_id(request_id):
+    """Получение заявки по ID"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM repair_requests WHERE id = ?', (request_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+def update_request_status(request_id, new_status):
+    """Обновление статуса заявки"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('UPDATE repair_requests SET status = ? WHERE id = ?', (new_status, request_id))
+        conn.commit()
+
+def delete_request(request_id):
+    """Удаление заявки"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM repair_requests WHERE id = ?', (request_id,))
+        conn.commit()
+
+def get_requests_stats():
+    """Получение статистики"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM repair_requests')
+        total = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT status, COUNT(*) FROM repair_requests GROUP BY status')
+        status_counts = dict(cursor.fetchall())
+        
+        cursor.execute('SELECT COUNT(*) FROM repair_requests WHERE DATE(created_at) = DATE("now")')
+        today = cursor.fetchone()[0]
+        
+        return {
+            'total': total,
+            'by_status': status_counts,
+            'today': today
+        }
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def validate_phone(phone):
-    """Простая проверка номера телефона"""
-    # Удаляем все кроме цифр
+    """Проверка номера телефона"""
     digits = ''.join(filter(str.isdigit, phone))
-    # Проверяем длину (10-11 цифр для российских номеров)
     return 10 <= len(digits) <= 11
 
-# ========== КНОПКИ ==========
+def get_status_emoji(status):
+    """Эмодзи для статуса"""
+    emojis = {
+        'Новая': '🆕',
+        'В работе': '⚙️',
+        'Готово': '✅'
+    }
+    return emojis.get(status, '📌')
+
+# ========== КЛАВИАТУРЫ ==========
 def get_main_menu():
-    """Главное меню"""
+    """Главное меню для клиентов"""
     buttons = [
         [InlineKeyboardButton("🆘 Создать заявку", callback_data="create")],
+        [InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")],
         [InlineKeyboardButton("📞 Контакты", callback_data="contacts")],
         [InlineKeyboardButton("💰 Цены", callback_data="prices")]
     ]
     return InlineKeyboardMarkup(buttons)
 
 def get_problems_menu():
-    """Меню выбора проблемы (расширенное)"""
+    """Меню выбора проблемы"""
     buttons = [
         [InlineKeyboardButton("💻 Не включается", callback_data="problem_not_starting")],
         [InlineKeyboardButton("🖥️ Медленно работает", callback_data="problem_slow")],
         [InlineKeyboardButton("🌡️ Перегревается", callback_data="problem_overheating")],
         [InlineKeyboardButton("🖨️ Проблема с оргтехникой", callback_data="problem_office")],
-        [InlineKeyboardButton("💿 Проблема с програмным обеспечением", callback_data="problem_software")],
+        [InlineKeyboardButton("💿 Проблема с ПО", callback_data="problem_software")],
         [InlineKeyboardButton("🌐 Нет интернета", callback_data="problem_internet")],
         [InlineKeyboardButton("❓ Другая проблема", callback_data="problem_other")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back")]
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
     return InlineKeyboardMarkup(buttons)
+
+def get_admin_main_menu():
+    """Главное меню администратора"""
+    buttons = [
+        [InlineKeyboardButton("📋 Все заявки", callback_data="admin_all")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton("🆕 Новые заявки", callback_data="admin_status_Новая")],
+        [InlineKeyboardButton("⚙️ В работе", callback_data="admin_status_В работе")],
+        [InlineKeyboardButton("✅ Готово", callback_data="admin_status_Готово")]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+def get_admin_request_management_keyboard(request_id, current_status):
+    """Клавиатура управления заявкой для админа"""
+    buttons = []
+    
+    # Кнопки изменения статуса
+    status_row = []
+    for status in ["Новая", "В работе", "Готово"]:
+        if status != current_status:
+            status_row.append(
+                InlineKeyboardButton(
+                    f"{get_status_emoji(status)} {status}",
+                    callback_data=f"admin_status_{request_id}_{status}"
+                )
+            )
+    if status_row:
+        buttons.append(status_row)
+    
+    # Кнопки действий
+    buttons.append([
+        InlineKeyboardButton("🗑 Удалить", callback_data=f"admin_delete_{request_id}"),
+        InlineKeyboardButton("📞 Контакты", callback_data=f"admin_contact_{request_id}")
+    ])
+    
+    # Кнопка назад
+    buttons.append([InlineKeyboardButton("◀️ Назад к списку", callback_data="admin_back_to_list")])
+    
+    return InlineKeyboardMarkup(buttons)
+
+def get_pagination_keyboard(current_page, total_pages, prefix):
+    """Клавиатура пагинации"""
+    buttons = []
+    nav_row = []
+    
+    if current_page > 0:
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"{prefix}_page_{current_page-1}"))
+    
+    nav_row.append(InlineKeyboardButton(f"{current_page+1}/{total_pages}", callback_data="ignore"))
+    
+    if current_page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"{prefix}_page_{current_page+1}"))
+    
+    buttons.append(nav_row)
+    buttons.append([InlineKeyboardButton("🏠 Главное меню", callback_data="admin_main")])
+    
+    return InlineKeyboardMarkup(buttons)
+
+def get_back_to_main_button():
+    """Кнопка возврата в главное меню"""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")
+    ]])
+
+# ========== ХРАНЕНИЕ СОСТОЯНИЙ ==========
+# Временное хранение данных при создании заявки
+user_states = {}
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,12 +259,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = f"""👋 Здравствуйте, {user.first_name}!
 
-🛠️ *Сервисный центр по ремонту и обслуживанию компьютеров*
+🛠️ **Сервисный центр по ремонту компьютеров**
 
 Мы поможем с любой проблемой:
 • Диагностика - бесплатно
 • Быстрый ремонт
-• Широкий спектр услуг
+• Гарантия на работы
 
 Выберите действие:"""
     
@@ -90,288 +274,483 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /help"""
-    await update.message.reply_text(
-        "📋 *Доступные команды:*\n"
-        "/start - Начать работу с ботом\n"
-        "/help - Получить справку\n\n"
-        "Используйте кнопки меню для навигации.",
-        parse_mode="Markdown"
-    )
-
-# ========== ОБРАБОТЧИКИ КНОПОК ==========
+# ========== ОБРАБОТЧИКИ КЛИЕНТСКОЙ ЧАСТИ ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатий на кнопки"""
+    """Обработка нажатий на кнопки (клиентская часть)"""
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
     data = query.data
     
-    if data == "back" or data == "menu":
-        # Возврат в главное меню
+    # Возврат в главное меню
+    if data == "back_to_main":
         await query.edit_message_text(
-            "📋 *Главное меню*\n\nВыберите нужное действие:",
+            "📋 **Главное меню**\n\nВыберите действие:",
             reply_markup=get_main_menu(),
             parse_mode="Markdown"
         )
     
+    # Создание заявки
     elif data == "create":
-        # Начать создание заявки
-        user_data[user_id] = {"step": "select_problem"}
+        user_states[user_id] = {"step": "select_problem"}
         await query.edit_message_text(
-            "🛠️ *Выберите тип проблемы:*\n\n"
-            "Пожалуйста, укажите наиболее подходящую категорию:",
+            "🛠️ **Выберите тип проблемы:**",
             reply_markup=get_problems_menu(),
             parse_mode="Markdown"
         )
     
-    elif data.startswith("problem_"):
-        # Пользователь выбрал проблему
-        problem_type = data.replace("problem_", "")
+    # Просмотр своих заявок
+    elif data == "my_requests":
+        requests = get_user_requests(user_id)
         
-        # Определяем название проблемы (расширенный список)
+        if not requests:
+            await query.edit_message_text(
+                "📭 У вас пока нет заявок.",
+                reply_markup=get_back_to_main_button(),
+                parse_mode="Markdown"
+            )
+            return
+        
+        text = "📋 **Ваши заявки:**\n\n"
+        for req in requests:
+            text += (
+                f"🔹 **Заявка №{req['id']}** от {req['created_at'][:10]}\n"
+                f"   Проблема: {req['problem_type']}\n"
+                f"   Статус: {get_status_emoji(req['status'])} {req['status']}\n"
+                f"   Описание: {req['problem_description'][:50]}...\n\n"
+            )
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=get_back_to_main_button(),
+            parse_mode="Markdown"
+        )
+    
+    # Контакты
+    elif data == "contacts":
+        text = (
+            "📞 **Контакты сервиса:**\n\n"
+            "📱 **Телефон:** +7 (913) 735-24-65\n"
+            "📧 **Email:** doc.cyber@yandex.ru\n"
+            "📍 **Адрес:** г. Обь, ул. Октябрьская, 5\n\n"
+            "🕐 **График работы:**\n"
+            "Пн-Пт: 9:00 - 20:00\n"
+            "Сб-Вс: 10:00 - 18:00"
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=get_back_to_main_button(),
+            parse_mode="Markdown"
+        )
+    
+    # Цены
+    elif data == "prices":
+        text = (
+            "💰 **Наши цены:**\n\n"
+            "🆓 **Диагностика** - БЕСПЛАТНО\n\n"
+            "🛠️ **Аппаратный ремонт:**\n"
+            "• Замена комплектующих ПК: от 300 ₽\n"
+            "• Замена комплектующих ноутбуков: от 2000 ₽\n\n"
+            "🖨️ **Оргтехника:**\n"
+            "• Обслуживание оргтехники: от 2000 ₽\n\n"
+            "💿 **Программное обеспечение:**\n"
+            "• Установка Windows: от 700 ₽\n"
+            "• Удаление вирусов: от 1000 ₽\n\n"
+            "🌡️ **Перегрев:**\n"
+            "• Замена термопасты: от 800 ₽\n"
+            "• Чистка системы охлаждения: от 1000 ₽"
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=get_back_to_main_button(),
+            parse_mode="Markdown"
+        )
+    
+    # Выбор проблемы
+    elif data.startswith("problem_"):
+        problem_type = data.replace("problem_", "")
         problem_names = {
             "not_starting": "💻 Не включается",
             "slow": "🖥️ Медленно работает",
             "overheating": "🌡️ Перегревается",
             "office": "🖨️ Проблема с оргтехникой",
-            "software": "💿 Проблема с программным обеспечением",
+            "software": "💿 Проблема с ПО",
             "internet": "🌐 Нет интернета",
             "other": "❓ Другая проблема"
         }
         
-        problem_name = problem_names.get(problem_type, "❓ Неизвестная проблема")
+        problem_name = problem_names.get(problem_type, "❓ Другая проблема")
         
-        # Сохраняем данные и переходим к запросу описания (ИЗМЕНЕНО: теперь сначала описание)
-        user_data[user_id] = {
-            "step": "enter_description",  # ИЗМЕНЕНО: было "enter_phone", стало "enter_description"
+        user_states[user_id] = {
+            "step": "enter_description",
             "problem_type": problem_type,
             "problem_name": problem_name
         }
         
         await query.edit_message_text(
-            f"✅ Выбрано: *{problem_name}*\n\n"
-            "📝 *Теперь подробно опишите проблему:*\n\n"  # ИЗМЕНЕНО: теперь запрашиваем описание
-            "Напишите сообщение с описанием, например:\n"
-            "• Когда началась проблема\n"
-            "• Что уже пробовали сделать\n"
-            "• Особые детали\n\n"
-            "✏️ *Введите ваше описание:*",
-            parse_mode="Markdown"
-        )
-    
-    elif data == "contacts":
-        await query.edit_message_text(
-            "📞 *Контакты сервиса:*\n\n"
-            "📱 *Телефон:* +7 (913) 735-24-65\n"
-            "📧 *Email:* doc.cyber@yandex.ru\n"
-            "📍 *Адрес:* г. Обь, ул. Октябрьская, 5\n\n"
-            "🕐 *График работы:*\n"
-            "Пн-Пт: 9:00 - 20:00\n"
-            "Сб-Вс: 10:00 - 18:00\n\n"
-            "🚗 *Есть бесплатная парковка*",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="menu")]]),
-            parse_mode="Markdown"
-        )
-    
-    elif data == "prices":
-        await query.edit_message_text(
-            "💰 *Наши цены:*\n\n"
-            "🆓 *Диагностика* - БЕСПЛАТНО\n\n"
-            "🛠️ *Аппаратный ремонт:*\n"
-            "• Замена комплектующих ПК: от 300 ₽\n"
-            "• Замена комплектующих ноутбуков: от 2000 ₽\n\n"
-            "🖨️ *Оргтехника:*\n"
-            "• Обслуживание оргтехники: от 2000 ₽\n\n"
-            "💿 *Программное обеспечение:*\n"
-            "• Установка драйверов: от 700 ₽\n"
-            "• Установка Windows/Linux: от 700 ₽\n"
-            "• Настройка ПО: от 500 ₽\n"
-            "• Удаление вирусов: от 1000 ₽\n\n"
-            "🌡️ *Перегрев:*\n"
-            "• Замена термопасты: от 800 ₽\n"
-            "• Чистка системы охлаждения: от 1000 ₽\n\n"
-            "*⚡ Точная цена после диагностики*",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🆘 Создать заявку", callback_data="create")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="menu")]
-            ]),
+            f"✅ Выбрано: **{problem_name}**\n\n"
+            "📝 **Опишите проблему подробно:**\n"
+            "Напишите сообщение с описанием...",
             parse_mode="Markdown"
         )
 
-# ========== ОБРАБОТКА СООБЩЕНИЙ ==========
+# ========== ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ==========
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений"""
+    """Обработка текстовых сообщений (создание заявки)"""
     user_id = update.effective_user.id
     user = update.effective_user
     message_text = update.message.text
     
-    # Проверяем, находится ли пользователь в процессе создания заявки
-    if user_id in user_data:
-        current_step = user_data[user_id].get("step")
-        
-        # ИЗМЕНЕНО: теперь сначала описание, потом телефон
-        # Шаг 1: Ввод описания проблемы (НОВЫЙ ПЕРВЫЙ ШАГ)
-        if current_step == "enter_description":
-            # Сохраняем описание
-            user_data[user_id]["description"] = message_text
-            # Меняем шаг на запрос телефона
-            user_data[user_id]["step"] = "enter_phone"
-            
-            # Переходим к запросу номера телефона
-            await update.message.reply_text(
-                f"📝 *Описание сохранено!*\n\n"
-                "📞 *Теперь укажите ваш номер телефона*\n\n"
-                "Напишите номер в формате:\n"
-                "• +7 (XXX) XXX-XX-XX\n"
-                "• 8 (XXX) XXX-XX-XX\n"
-                "• или просто 10-11 цифр\n\n"
-                "✏️ *Введите номер телефона:*",
-                parse_mode="Markdown"
-            )
-        
-        # Шаг 2: Ввод номера телефона (НОВЫЙ ВТОРОЙ ШАГ)
-        elif current_step == "enter_phone":
-            # Проверяем корректность номера
-            if not validate_phone(message_text):
-                await update.message.reply_text(
-                    "❌ *Неверный формат номера*\n\n"
-                    "Пожалуйста, введите корректный номер телефона:\n"
-                    "• +7 (XXX) XXX-XX-XX\n"
-                    "• 8 (XXX) XXX-XX-XX\n"
-                    "• или просто 10-11 цифр\n\n"
-                    "✏️ *Попробуйте снова:*",
-                    parse_mode="Markdown"
-                )
-                return
-            
-            # Сохраняем номер телефона
-            user_data[user_id]["phone"] = message_text
-            # Получаем сохраненное ранее описание
-            problem_info = user_data[user_id]
-            problem_description = problem_info.get('description', 'Не указано')
-            
-            try:
-                # Формируем заявку для пользователя
-                user_request_text = f"""📋 *ВАША ЗАЯВКА ПРИНЯТА*
-
-🔧 *Проблема:* {problem_info.get('problem_name', 'Не указана')}
-📝 *Описание:* {problem_description}
-
-👤 *Ваши данные:*
-• Имя: {user.full_name}
-• Username: @{user.username or 'не указан'}
-• Телефон: {message_text}
-• ID: {user_id}
-
-📅 *Время создания:* {datetime.now().strftime('%d.%m.%Y %H:%M')}
-
-✅ *Заявка №{user_id % 10000} принята!*
-Наш специалист свяжется с вами в ближайшее время.
-
-📞 *Контакты для срочных вопросов:*
-+7 (913) 735-24-65"""
-                
-                # Формируем заявку для администратора (с телефоном и описанием)
-                admin_request_text = f"""🎯 *НОВАЯ ЗАЯВКА НА РЕМОНТ!*
-
-👤 *КЛИЕНТ:*
-• Имя: {user.full_name}
-• Username: @{user.username or 'нет'}
-• Телефон: {message_text}
-• ID: {user_id}
-
-🔧 *ПРОБЛЕМА:* {problem_info.get('problem_name', 'Не указана')}
-📝 *ОПИСАНИЕ:*
-{problem_description}
-
-📅 *ВРЕМЯ:* {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
-🆔 *НОМЕР ЗАЯВКИ:* {user_id % 10000}
-
-━━━━━━━━━━━━━━━━━━━━━━
-⚠️ *ТРЕБУЕТСЯ ОБРАБОТКА*"""
-                
-                # Шаг 1: Отправляем подтверждение пользователю
-                await update.message.reply_text(
-                    "⏳ *Обрабатываю вашу заявку...*",
-                    parse_mode="Markdown"
-                )
-                
-                # Небольшая пауза для лучшего UX
-                await asyncio.sleep(1)
-                
-                # Шаг 2: Отправляем детали пользователю
-                await update.message.reply_text(
-                    user_request_text,
-                    parse_mode="Markdown"
-                )
-                
-                # Шаг 3: Отправляем заявку администратору
-                if ADMIN_ID and ADMIN_ID != 123456789:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=admin_request_text,
-                            parse_mode="Markdown"
-                        )
-                        logger.info(f"✅ Заявка отправлена администратору {ADMIN_ID}")
-                    except Exception as admin_error:
-                        logger.error(f"❌ Ошибка отправки администратору: {admin_error}")
-                        # Продолжаем работу даже если не удалось отправить админу
-                else:
-                    logger.warning("⚠️ ADMIN_ID не настроен! Заявка не отправлена администратору.")
-                
-                # Шаг 4: Показываем финальное сообщение с меню
-                await update.message.reply_text(
-                    "✅ *Заявка успешно создана и отправлена!*\n\n"
-                    "📱 *Что дальше?*\n"
-                    "1. Наш специалист получил вашу заявку.\n"
-                    "2. Он свяжется с вами по указанному телефону в ближайшее время.\n"
-                    "3. Если вопрос срочный, позвоните нам по телефону +7 (913) 735-24-65.\n\n"
-                    "⬇️ *Вернуться в главное меню:*",
-                    reply_markup=get_main_menu(),
-                    parse_mode="Markdown"
-                )
-                
-                # Очищаем данные пользователя после завершения заявки
-                # Можно закомментировать, если нужно хранить историю, но лучше очищать
-                del user_data[user_id]
-                
-            except Exception as e:
-                logger.error(f"❌ Ошибка при создании заявки: {e}")
-                await update.message.reply_text(
-                    "❌ *Произошла ошибка при создании заявки*\n\n"
-                    "Пожалуйста, попробуйте позже или свяжитесь с нами по телефону.",
-                    reply_markup=get_main_menu(),
-                    parse_mode="Markdown"
-                )
-    else:
-        # Если пользователь не в процессе создания заявки
+    # Проверяем, есть ли пользователь в процессе создания заявки
+    if user_id not in user_states:
         await update.message.reply_text(
-            "Используйте /start для начала работы с ботом",
+            "Используйте кнопки меню для навигации.",
             reply_markup=get_main_menu()
         )
+        return
+    
+    current_step = user_states[user_id].get("step")
+    
+    # Шаг 1: Ввод описания
+    if current_step == "enter_description":
+        user_states[user_id]["description"] = message_text
+        user_states[user_id]["step"] = "enter_phone"
+        
+        await update.message.reply_text(
+            "📝 **Описание сохранено!**\n\n"
+            "📞 **Введите номер телефона:**\n"
+            "Например: +7 (913) 735-24-65",
+            parse_mode="Markdown"
+        )
+    
+    # Шаг 2: Ввод телефона
+    elif current_step == "enter_phone":
+        if not validate_phone(message_text):
+            await update.message.reply_text(
+                "❌ **Неверный формат номера**\n\n"
+                "Введите номер еще раз:",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Сохраняем заявку в БД
+        try:
+            request_id = add_request(
+                user_id=user_id,
+                username=user.username,
+                client_name=user.full_name,
+                phone=message_text,
+                problem_type=user_states[user_id]["problem_name"],
+                problem_description=user_states[user_id]["description"]
+            )
+            
+            # Отправляем подтверждение пользователю
+            await update.message.reply_text(
+                f"✅ **Заявка №{request_id} принята!**\n\n"
+                f"Наш специалист свяжется с вами в ближайшее время.",
+                parse_mode="Markdown"
+            )
+            
+            # Отправляем уведомление админу
+            if ADMIN_ID:
+                admin_text = (
+                    f"🎯 **НОВАЯ ЗАЯВКА №{request_id}**\n\n"
+                    f"👤 **Клиент:** {user.full_name}\n"
+                    f"📞 **Телефон:** {message_text}\n"
+                    f"🆔 **Username:** @{user.username or 'нет'}\n"
+                    f"🔧 **Проблема:** {user_states[user_id]['problem_name']}\n"
+                    f"📝 **Описание:** {user_states[user_id]['description']}\n"
+                    f"📅 **Время:** {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                )
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=admin_text,
+                    parse_mode="Markdown"
+                )
+            
+            # Очищаем состояние
+            del user_states[user_id]
+            
+        except Exception as e:
+            logger.error(f"Ошибка сохранения заявки: {e}")
+            await update.message.reply_text(
+                "❌ Произошла ошибка. Попробуйте позже.",
+                reply_markup=get_main_menu()
+            )
 
-# ========== ЗАПУСК БОТА ==========
-async def post_init(application: Application):
-    """Действия после инициализации бота"""
-    logger.info("🚀 Бот запущен и готов к работе!")
+# ========== ОБРАБОТЧИКИ АДМИН-ПАНЕЛИ (ТОЛЬКО КНОПКИ) ==========
+async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка всех кнопок админ-панели"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Проверка прав администратора
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("⛔ Доступ запрещен!", show_alert=True)
+        return
+    
+    data = query.data
+    
+    # Главное меню админа
+    if data == "admin_main":
+        await query.edit_message_text(
+            "🔐 **Панель администратора**\n\nВыберите действие:",
+            reply_markup=get_admin_main_menu(),
+            parse_mode="Markdown"
+        )
+    
+    # Статистика
+    elif data == "admin_stats":
+        stats = get_requests_stats()
+        text = (
+            f"📊 **Статистика заявок**\n\n"
+            f"📌 Всего заявок: **{stats['total']}**\n"
+            f"📅 За сегодня: **{stats['today']}**\n\n"
+            f"🆕 Новых: **{stats['by_status'].get('Новая', 0)}**\n"
+            f"⚙️ В работе: **{stats['by_status'].get('В работе', 0)}**\n"
+            f"✅ Готово: **{stats['by_status'].get('Готово', 0)}**"
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Назад", callback_data="admin_main")
+            ]]),
+            parse_mode="Markdown"
+        )
+    
+    # Показать все заявки
+    elif data == "admin_all":
+        await show_admin_requests_page(query, 0, "all")
+    
+    # Показать заявки по статусу
+    elif data.startswith("admin_status_") and "_page_" not in data:
+        status = data.replace("admin_status_", "")
+        await show_admin_requests_page(query, 0, "status", status)
+    
+    # Пагинация для всех заявок
+    elif data.startswith("admin_all_page_"):
+        page = int(data.split("_")[-1])
+        await show_admin_requests_page(query, page, "all")
+    
+    # Пагинация для заявок по статусу
+    elif data.startswith("admin_status_") and "_page_" in data:
+        parts = data.split("_page_")
+        status = parts[0].replace("admin_status_", "")
+        page = int(parts[1])
+        await show_admin_requests_page(query, page, "status", status)
+    
+    # Управление конкретной заявкой
+    elif data.startswith("admin_manage_"):
+        request_id = int(data.split("_")[-1])
+        request = get_request_by_id(request_id)
+        
+        if not request:
+            await query.edit_message_text("❌ Заявка не найдена")
+            return
+        
+        text = (
+            f"🔧 **Управление заявкой №{request['id']}**\n\n"
+            f"👤 **Клиент:** {request['client_name']}\n"
+            f"📞 **Телефон:** {request['phone']}\n"
+            f"🆔 **Username:** @{request['username'] or 'нет'}\n"
+            f"🔧 **Проблема:** {request['problem_type']}\n"
+            f"📝 **Описание:** {request['problem_description']}\n"
+            f"📅 **Создана:** {request['created_at']}\n"
+            f"🔹 **Текущий статус:** {get_status_emoji(request['status'])} {request['status']}"
+        )
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=get_admin_request_management_keyboard(request_id, request['status']),
+            parse_mode="Markdown"
+        )
+    
+    # Изменение статуса
+    elif data.startswith("admin_status_"):
+        parts = data.split("_")
+        request_id = int(parts[2])
+        new_status = parts[3]
+        
+        # Обновляем статус
+        update_request_status(request_id, new_status)
+        
+        # Уведомляем клиента
+        request = get_request_by_id(request_id)
+        if request:
+            try:
+                await context.bot.send_message(
+                    request['user_id'],
+                    f"{get_status_emoji(new_status)} **Статус заявки №{request_id} изменен!**\n\n"
+                    f"Новый статус: **{new_status}**",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить клиента: {e}")
+        
+        # Возвращаемся к управлению заявкой
+        query.data = f"admin_manage_{request_id}"
+        await admin_button_handler(update, context)
+    
+    # Контакты клиента
+    elif data.startswith("admin_contact_"):
+        request_id = int(data.split("_")[-1])
+        request = get_request_by_id(request_id)
+        
+        if request:
+            text = (
+                f"📞 **Контакты клиента**\n\n"
+                f"👤 **Имя:** {request['client_name']}\n"
+                f"📱 **Телефон:** {request['phone']}\n"
+                f"🆔 **Telegram ID:** `{request['user_id']}`\n"
+                f"📱 **Username:** @{request['username'] or 'не указан'}"
+            )
+            
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Написать", url=f"tg://user?id={request['user_id']}")],
+                [InlineKeyboardButton("◀️ Назад", callback_data=f"admin_manage_{request_id}")]
+            ])
+            
+            await query.edit_message_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+    
+    # Удаление заявки (подтверждение)
+    elif data.startswith("admin_delete_"):
+        request_id = int(data.split("_")[-1])
+        
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Да", callback_data=f"admin_confirm_delete_{request_id}"),
+                InlineKeyboardButton("❌ Нет", callback_data=f"admin_manage_{request_id}")
+            ]
+        ])
+        
+        await query.edit_message_text(
+            f"⚠️ **Удалить заявку №{request_id}?**",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+    
+    # Подтверждение удаления
+    elif data.startswith("admin_confirm_delete_"):
+        request_id = int(data.split("_")[-1])
+        delete_request(request_id)
+        
+        await query.edit_message_text(
+            f"✅ Заявка №{request_id} удалена.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ К списку", callback_data="admin_all")
+            ]])
+        )
+    
+    # Назад к списку
+    elif data == "admin_back_to_list":
+        query.data = "admin_all"
+        await admin_button_handler(update, context)
+    
+    # Заглушка для некликабельных кнопок
+    elif data == "ignore":
+        pass
 
+async def show_admin_requests_page(query, page, filter_type, status=None):
+    """Отображение страницы с заявками для админа"""
+    # Получаем заявки
+    if filter_type == "all":
+        all_requests = get_all_requests()
+        prefix = "admin_all"
+    else:
+        all_requests = get_requests_by_status(status)
+        prefix = f"admin_status_{status}"
+    
+    if not all_requests:
+        await query.edit_message_text(
+            "📭 Заявок не найдено",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Назад", callback_data="admin_main")
+            ]])
+        )
+        return
+    
+    # Пагинация
+    total_pages = (len(all_requests) + REQUESTS_PER_PAGE - 1) // REQUESTS_PER_PAGE
+    start = page * REQUESTS_PER_PAGE
+    end = start + REQUESTS_PER_PAGE
+    requests_page = all_requests[start:end]
+    
+    # Формируем текст
+    text = f"📋 **Список заявок** (стр. {page+1}/{total_pages})\n\n"
+    
+    for req in requests_page:
+        text += (
+            f"{get_status_emoji(req['status'])} **№{req['id']}** | {req['created_at'][:16]}\n"
+            f"👤 {req['client_name']}\n"
+            f"📞 {req['phone']}\n"
+            f"📝 {req['problem_description'][:50]}...\n\n"
+        )
+    
+    # Создаем клавиатуру
+    buttons = []
+    
+    # Кнопки для каждой заявки
+    for req in requests_page:
+        buttons.append([InlineKeyboardButton(
+            f"🔧 Управлять №{req['id']}",
+            callback_data=f"admin_manage_{req['id']}"
+        )])
+    
+    # Кнопки пагинации
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"{prefix}_page_{page-1}"))
+    nav_row.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="ignore"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"{prefix}_page_{page+1}"))
+    buttons.append(nav_row)
+    
+    # Кнопка в главное меню
+    buttons.append([InlineKeyboardButton("🏠 Главное меню", callback_data="admin_main")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown"
+    )
+
+# ========== ОСНОВНАЯ ФУНКЦИЯ ==========
 def main():
-    """Главная функция запуска бота"""
-    # Создаем приложение
-    application = Application.builder().token(TOKEN).post_init(post_init).build()
+    """Запуск бота"""
+    # Инициализация БД
+    init_database()
     
-    # Добавляем обработчики
+    # Создание приложения
+    application = Application.builder().token(TOKEN).build()
+    
+    # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    # Запускаем бота
-    logger.info("🔄 Запуск бота...")
+    # Обработчик для клиентских кнопок (все, кроме admin_*)
+    application.add_handler(CallbackQueryHandler(
+        button_handler, 
+        pattern="^(?!admin_).*"  # Все что не начинается с admin_
+    ))
+    
+    # Обработчик для админских кнопок
+    application.add_handler(CallbackQueryHandler(
+        admin_button_handler,
+        pattern="^admin_.*"
+    ))
+    
+    # Обработчик текстовых сообщений
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, 
+        message_handler
+    ))
+    
+    # Запуск
+    logger.info("🚀 Бот запущен...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
