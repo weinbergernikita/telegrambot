@@ -657,7 +657,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     logger.info("🚀 Бот запущен")
-    app.run_polling(allowed_updates=Update.ALL_TYPEadmin_command)
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
