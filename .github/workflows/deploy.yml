@@ -21,8 +21,8 @@ jobs:
             cd /home/deploy/telegrambot
             git pull telegrambot main
             source ./venv/bin/activate
-            pip install requirements.txt
+            pip install -r requirements.txt
             deactivate
-            systemctl stop servicebot.service
-            systemctl daemon-reload
-            systemctl start servicebot.service
+            sudo systemctl stop servicebot.service
+            sudo systemctl daemon-reload
+            sudo systemctl start servicebot.service
