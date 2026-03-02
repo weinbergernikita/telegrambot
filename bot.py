@@ -317,8 +317,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
 
     elif data == "admin_back_to_list":
-        query.data = "admin_all"
-        await admin_callback_handler(update, context)
+        await show_admin_requests_page(query, 0, "all")
 
     elif data == "ignore":
         pass
