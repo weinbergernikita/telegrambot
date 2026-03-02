@@ -101,6 +101,7 @@ def get_request_by_id(request_id):
 def update_request_status(request_id, new_status):
     with get_connection() as conn:
         conn.execute('UPDATE repair_requests SET status = ? WHERE id = ?', (new_status, request_id))
+        conn.commit()
 
 def delete_request(request_id):
     with get_connection() as conn:
@@ -128,7 +129,7 @@ def get_main_menu():
     """Главное меню (добавлена кнопка 'Мои заявки')"""
     buttons = [
         [InlineKeyboardButton("🆘 Создать заявку", callback_data="create")],
-        [InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")],  # НОВАЯ КНОПКА
+        [InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")],
         [InlineKeyboardButton("📞 Контакты", callback_data="contacts")],
         [InlineKeyboardButton("💰 Цены", callback_data="prices")]
     ]
@@ -176,7 +177,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ========== АДМИН-ПАНЕЛЬ (ТОЛЬКО КНОПКИ) ==========
+# ========== АДМИН-ПАНЕЛЬ ==========
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Вход в админ-панель по команде /admin"""
     if update.effective_user.id != ADMIN_ID:
@@ -207,10 +208,57 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     data = query.data
 
+    # ----- ВАЖНО: сначала проверяем изменение статуса -----
+    if data.startswith("admin_status_change_"):
+        # Разбираем callback: admin_status_change_<request_id>_<status>
+        # Используем split с ограничением, чтобы статус мог содержать пробелы
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            await query.answer("Ошибка данных", show_alert=True)
+            return
+        request_id = int(parts[3])
+        new_status = parts[4]  # весь остаток после четвёртого подчёркивания
+
+        # Обновляем статус в БД
+        update_request_status(request_id, new_status)
+
+        # Уведомляем клиента
+        req = get_request_by_id(request_id)
+        if req:
+            try:
+                await context.bot.send_message(
+                    req['user_id'],
+                    f"{status_emoji(new_status)} **Статус заявки №{request_id} изменён!**\n\nНовый статус: **{new_status}**",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить клиента: {e}")
+
+        # Показываем обновлённую карточку заявки
+        req = get_request_by_id(request_id)
+        if req:
+            text = (
+                f"🔧 **Управление заявкой №{req['id']}**\n\n"
+                f"👤 **Клиент:** {req['client_name']}\n"
+                f"📞 **Телефон:** {req['phone']}\n"
+                f"🆔 **Username:** @{req['username'] or 'нет'}\n"
+                f"🔧 **Проблема:** {req['problem_type']}\n"
+                f"📝 **Описание:** {req['problem_description']}\n"
+                f"📅 **Создана:** {req['created_at']}\n"
+                f"🔹 **Статус:** {status_emoji(req['status'])} {req['status']}"
+            )
+            keyboard = get_admin_manage_keyboard(request_id, req['status'])
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        else:
+            await query.edit_message_text("❌ Заявка не найдена")
+        return
+
+    # ----- Далее остальные админские обработчики -----
     if data == "admin_main":
         await show_admin_main_menu(query.message)
+        return
 
-    elif data == "admin_stats":
+    if data == "admin_stats":
         stats = get_requests_stats()
         text = (
             f"📊 **Статистика заявок**\n\n"
@@ -222,24 +270,30 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_main")]])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
 
-    elif data.startswith("admin_all"):
+    if data.startswith("admin_all"):
         page = 0
         if data.startswith("admin_all_page_"):
             page = int(data.split("_")[-1])
         await show_admin_requests_page(query, page, "all")
+        return
 
-    elif data.startswith("admin_status_") and "_page_" not in data:
+    # Просмотр по статусу (без пагинации)
+    if data.startswith("admin_status_") and "_page_" not in data:
         status = data.replace("admin_status_", "")
         await show_admin_requests_page(query, 0, "status", status)
+        return
 
-    elif data.startswith("admin_status_") and "_page_" in data:
+    # Просмотр по статусу с пагинацией
+    if data.startswith("admin_status_") and "_page_" in data:
         parts = data.split("_page_")
         status = parts[0].replace("admin_status_", "")
         page = int(parts[1])
         await show_admin_requests_page(query, page, "status", status)
+        return
 
-    elif data.startswith("admin_manage_"):
+    if data.startswith("admin_manage_"):
         request_id = int(data.split("_")[-1])
         req = get_request_by_id(request_id)
         if not req:
@@ -258,44 +312,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         keyboard = get_admin_manage_keyboard(request_id, req['status'])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
 
-    elif data.startswith("admin_status_change_"):
-        parts = data.split("_")
-        request_id = int(parts[3])
-        new_status = parts[4]
-        update_request_status(request_id, new_status)
-
-    # Уведомить клиента
-        req = get_request_by_id(request_id)
-        if req:
-            try:
-                await context.bot.send_message(
-                req['user_id'],
-                f"{status_emoji(new_status)} **Статус заявки №{request_id} изменён!**\n\nНовый статус: **{new_status}**",
-                parse_mode="Markdown"
-            )
-            except Exception as e:
-                logger.error(f"Не удалось уведомить клиента: {e}")
-
-    # Показать обновлённое управление заявкой
-        req = get_request_by_id(request_id)  # обновляем данные
-        if req:
-            text = (
-                f"🔧 **Управление заявкой №{req['id']}**\n\n"
-                f"👤 **Клиент:** {req['client_name']}\n"
-                f"📞 **Телефон:** {req['phone']}\n"
-                f"🆔 **Username:** @{req['username'] or 'нет'}\n"
-                f"🔧 **Проблема:** {req['problem_type']}\n"
-                f"📝 **Описание:** {req['problem_description']}\n"
-                f"📅 **Создана:** {req['created_at']}\n"
-                f"🔹 **Статус:** {status_emoji(req['status'])} {req['status']}"
-            )
-            keyboard = get_admin_manage_keyboard(request_id, req['status'])
-            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        else:
-            await query.edit_message_text("❌ Заявка не найдена")
-
-    elif data.startswith("admin_contact_"):
+    if data.startswith("admin_contact_"):
         request_id = int(data.split("_")[-1])
         req = get_request_by_id(request_id)
         if req:
@@ -311,8 +330,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 [InlineKeyboardButton("◀️ Назад", callback_data=f"admin_manage_{request_id}")]
             ])
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
 
-    elif data.startswith("admin_delete_"):
+    if data.startswith("admin_delete_"):
         request_id = int(data.split("_")[-1])
         keyboard = InlineKeyboardMarkup([
             [
@@ -321,19 +341,23 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             ]
         ])
         await query.edit_message_text(f"⚠️ **Удалить заявку №{request_id}?**", reply_markup=keyboard, parse_mode="Markdown")
+        return
 
-    elif data.startswith("admin_confirm_delete_"):
+    if data.startswith("admin_confirm_delete_"):
         request_id = int(data.split("_")[-1])
         delete_request(request_id)
         await query.edit_message_text(
             f"✅ Заявка №{request_id} удалена.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ К списку", callback_data="admin_all")]])
         )
+        return
 
-    elif data == "admin_back_to_list":
+    if data == "admin_back_to_list":
+        # Просто показываем список всех заявок с первой страницы
         await show_admin_requests_page(query, 0, "all")
+        return
 
-    elif data == "ignore":
+    if data == "ignore":
         pass
 
 def get_admin_manage_keyboard(request_id, current_status):
@@ -445,7 +469,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         problem_name = problem_names.get(problem_type, "❓ Неизвестная проблема")
 
-        # Сохраняем проблему и переходим к запросу телефона (оригинальный порядок: проблема -> телефон -> описание)
+        # Сохраняем проблему и переходим к запросу телефона
         user_states[user_id] = {
             "step": "enter_phone",
             "problem_type": problem_type,
@@ -525,7 +549,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# ========== ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ (ОРИГИНАЛЬНАЯ ЛОГИКА + СОХРАНЕНИЕ В БД) ==========
+# ========== ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ==========
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = update.effective_user
@@ -581,7 +605,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             logger.info(f"✅ Заявка #{request_id} сохранена")
 
-            # Отправляем подтверждение пользователю (оригинальный текст)
+            # Отправляем подтверждение пользователю
             user_request_text = f"""📋 *ВАША ЗАЯВКА ПРИНЯТА*
 
 🔧 *Проблема:* {problem_name}
@@ -606,13 +630,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             await asyncio.sleep(1)
+            # ФИНАЛЬНОЕ СООБЩЕНИЕ С ГЛАВНЫМ МЕНЮ (ИСПРАВЛЕНО)
             await update.message.reply_text(
                 user_request_text,
                 parse_mode="Markdown",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu()   # ← добавлено
             )
 
-            # Отправляем админу (оригинальное сообщение)
+            # Отправляем админу
             if ADMIN_ID:
                 admin_text = f"""🎯 *НОВАЯ ЗАЯВКА НА РЕМОНТ!*
 
