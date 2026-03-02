@@ -164,7 +164,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Широкий спектр услуг
 
 Выберите действие:"""
-    await update.message.reply_text(text, reply_markup=get_main_menu(), parse_mode="Markdown", reply_markup=get_main_menu())
+    await update.message.reply_text(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -596,6 +596,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 user_request_text,
                 parse_mode="Markdown"
+                reply_markup=get_main_menu()
             )
 
             # Отправляем админу (оригинальное сообщение)
