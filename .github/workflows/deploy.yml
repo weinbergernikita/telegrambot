@@ -24,7 +24,8 @@ jobs:
             # git pull telegrambot main
             cd /home/deploy/telegrambot
             touch 123.txt
-            echo 123 > 123.txt
+            echo 1234 > 123.txt
+            git pull telegrambot main
             systemctl stop servicebot.service
             systemctl daemon-reload
             systemctl start servicebot.service
