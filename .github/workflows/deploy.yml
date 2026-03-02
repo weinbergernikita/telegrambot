@@ -13,15 +13,18 @@ jobs:
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v0.1.10  # Популярное действие для SSH
-         with:
+        with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-              git clone https://github.com/weinbergernikita/telegrambot.git
+#              git clone https://github.com/weinbergernikita/telegrambot.git
 #             source /home/deploy/.bashrc
 #             cd /home/deploy/telegrambot/
 #             git pull telegrambot main
+             cd /home/deploy/telegrambot
+             touch 123.txt
+             echo 123 > 123.txt
              systemctl stop servicebot.service
              systemctl daemon-reload
              systemctl start servicebot.service
