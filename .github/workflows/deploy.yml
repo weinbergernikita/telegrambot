@@ -18,8 +18,6 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            echo "Текущий пользователь: $(whoami)"
-            source /home/deploy/.bashrc
             cd /home/deploy/telegrambot
             git pull telegrambot main
             source ./venv/bin/activate
