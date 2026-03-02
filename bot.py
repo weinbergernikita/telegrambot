@@ -265,21 +265,35 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         new_status = parts[4]
         update_request_status(request_id, new_status)
 
-        # Уведомить клиента
+    # Уведомить клиента
         req = get_request_by_id(request_id)
         if req:
             try:
                 await context.bot.send_message(
-                    req['user_id'],
-                    f"{status_emoji(new_status)} **Статус заявки №{request_id} изменён!**\n\nНовый статус: **{new_status}**",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.error(f"Не удалось уведомить клиента: {e}")
+                req['user_id'],
+                f"{status_emoji(new_status)} **Статус заявки №{request_id} изменён!**\n\nНовый статус: **{new_status}**",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить клиента: {e}")
 
-        # Вернуться к управлению
-        query.data = f"admin_manage_{request_id}"
-        await admin_callback_handler(update, context)
+    # Показать обновлённое управление заявкой
+        req = get_request_by_id(request_id)  # обновляем данные
+        if req:
+            text = (
+                f"🔧 **Управление заявкой №{req['id']}**\n\n"
+                f"👤 **Клиент:** {req['client_name']}\n"
+                f"📞 **Телефон:** {req['phone']}\n"
+                f"🆔 **Username:** @{req['username'] or 'нет'}\n"
+                f"🔧 **Проблема:** {req['problem_type']}\n"
+                f"📝 **Описание:** {req['problem_description']}\n"
+                f"📅 **Создана:** {req['created_at']}\n"
+                f"🔹 **Статус:** {status_emoji(req['status'])} {req['status']}"
+            )
+            keyboard = get_admin_manage_keyboard(request_id, req['status'])
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        else:
+            await query.edit_message_text("❌ Заявка не найдена")
 
     elif data.startswith("admin_contact_"):
         request_id = int(data.split("_")[-1])
