@@ -595,7 +595,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(1)
             await update.message.reply_text(
                 user_request_text,
-                parse_mode="Markdown"
+                parse_mode="Markdown",
                 reply_markup=get_main_menu()
             )
 
