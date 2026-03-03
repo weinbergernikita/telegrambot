@@ -152,7 +152,8 @@ def validate_phone(phone):
     return 10 <= len(digits) <= 11
 
 def status_emoji(status):
-    return {'Новая': '🆕', 'В работе': '⚙️', 'Готово': '✅'}.get(status, '📌')
+    # NEW: добавлен статус "Ожидает запчасти" с эмодзи ⏳
+    return {'Новая': '🆕', 'В работе': '⚙️', 'Ожидает запчасти': '⏳', 'Готово': '✅'}.get(status, '📌')
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_menu():
@@ -216,11 +217,13 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_admin_main_menu(message):
     text = "🔐 **Панель администратора**\n\nВыберите действие:"
+    # NEW: добавлена кнопка для статуса "Ожидает запчасти"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Все заявки", callback_data="admin_all")],
         [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("🆕 Новые", callback_data="admin_status_Новая")],
         [InlineKeyboardButton("⚙️ В работе", callback_data="admin_status_В работе")],
+        [InlineKeyboardButton("⏳ Ожидает запчасти", callback_data="admin_status_Ожидает запчасти")],
         [InlineKeyboardButton("✅ Готово", callback_data="admin_status_Готово")],
         [InlineKeyboardButton("➕ Добавить заявку", callback_data="admin_add_request")]
     ])
@@ -313,6 +316,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             f"📅 За сегодня: **{stats['today']}**\n\n"
             f"🆕 Новых: **{stats['by_status'].get('Новая', 0)}**\n"
             f"⚙️ В работе: **{stats['by_status'].get('В работе', 0)}**\n"
+            f"⏳ Ожидает запчасти: **{stats['by_status'].get('Ожидает запчасти', 0)}**\n"  # NEW: отображение статистики
             f"✅ Готово: **{stats['by_status'].get('Готово', 0)}**"
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_main")]])
@@ -408,7 +412,8 @@ def get_admin_manage_keyboard(request_id, current_status):
     buttons = []
     # Кнопки изменения статуса
     status_row = []
-    for status in ["Новая", "В работе", "Готово"]:
+    # NEW: добавлен статус "Ожидает запчасти" в список
+    for status in ["Новая", "В работе", "Ожидает запчасти", "Готово"]:
         if status != current_status:
             status_row.append(InlineKeyboardButton(
                 f"{status_emoji(status)} {status}",
