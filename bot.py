@@ -471,13 +471,14 @@ async def show_admin_requests_page(query, page, filter_type, status=None):
     buttons.append([InlineKeyboardButton("🏠 Главное меню", callback_data="admin_main")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
-async def show_comments(query, request_id):
+# ========== НОВАЯ ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ==========
+def get_comments_text(request_id):
+    """Формирует текст со списком комментариев для заявки"""
     comments = get_comments(request_id)
     req = get_request_by_id(request_id)
     if not req:
-        await query.edit_message_text("❌ Заявка не найдена")
-        return
-
+        return "❌ Заявка не найдена"
+    
     text = f"💬 **Комментарии к заявке №{request_id}**\n\n"
     if not comments:
         text += "Пока нет комментариев.\n"
@@ -485,7 +486,11 @@ async def show_comments(query, request_id):
         for c in comments:
             date = c['created_at'][:16] if c['created_at'] else 'неизвестно'
             text += f"[{date}] Админ {c['admin_id']}: {c['comment']}\n\n"
+    return text
 
+async def show_comments(query, request_id):
+    """Редактирует текущее сообщение, показывая комментарии (для callback)"""
+    text = get_comments_text(request_id)
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить комментарий", callback_data=f"admin_add_comment_{request_id}")],
         [InlineKeyboardButton("◀️ Назад к заявке", callback_data=f"admin_manage_{request_id}")]
@@ -703,9 +708,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == "add_comment":
             request_id = state["request_id"]
             add_comment(request_id, user_id, text)
-            await update.message.reply_text("✅ Комментарий добавлен.")
-            # Показываем обновлённые комментарии
-            await show_comments(await update.message.reply_text("Обновляем..."), request_id)
+            # Отправляем новое сообщение с обновлённым списком комментариев
+            comments_text = get_comments_text(request_id)
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Добавить комментарий", callback_data=f"admin_add_comment_{request_id}")],
+                [InlineKeyboardButton("◀️ Назад к заявке", callback_data=f"admin_manage_{request_id}")]
+            ])
+            await update.message.reply_text(comments_text, reply_markup=keyboard, parse_mode="Markdown")
             del admin_states[user_id]
             return
 
