@@ -19,9 +19,8 @@ ADMIN_ID = os.getenv("ADMIN_ID")
 if ADMIN_ID:
     ADMIN_ID = int(ADMIN_ID)
 
-# База данных
 DATABASE_NAME = "service_bot.db"
-REQUESTS_PER_PAGE = 5  # для пагинации в админке
+REQUESTS_PER_PAGE = 5
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,6 +40,7 @@ def get_connection():
 
 def init_database():
     with get_connection() as conn:
+        # Таблица заявок (существующая)
         conn.execute('''
             CREATE TABLE IF NOT EXISTS repair_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,9 +54,20 @@ def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-    logger.info("✅ База данных готова")
+        # Новая таблица для комментариев
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS request_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id INTEGER NOT NULL,
+                admin_id INTEGER NOT NULL,
+                comment TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (request_id) REFERENCES repair_requests (id) ON DELETE CASCADE
+            )
+        ''')
+    logger.info("✅ База данных готова (с таблицей комментариев)")
 
-# --- Работа с заявками ---
+# --- Работа с заявками (без изменений) ---
 def add_request(user_id, username, client_name, phone, problem_type, problem_description):
     with get_connection() as conn:
         cur = conn.cursor()
@@ -116,6 +127,27 @@ def get_requests_stats():
         by_status = dict(cur.fetchall())
         return {'total': total, 'today': today, 'by_status': by_status}
 
+# --- Новые функции для комментариев ---
+def add_comment(request_id, admin_id, comment):
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO request_comments (request_id, admin_id, comment)
+            VALUES (?, ?, ?)
+        ''', (request_id, admin_id, comment))
+        conn.commit()
+        return cur.lastrowid
+
+def get_comments(request_id):
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT * FROM request_comments 
+            WHERE request_id = ? 
+            ORDER BY created_at ASC
+        ''', (request_id,))
+        return [dict(row) for row in cur.fetchall()]
+
 # ========== ВСПОМОГАТЕЛЬНЫЕ ==========
 def validate_phone(phone):
     digits = ''.join(filter(str.isdigit, phone))
@@ -124,9 +156,8 @@ def validate_phone(phone):
 def status_emoji(status):
     return {'Новая': '🆕', 'В работе': '⚙️', 'Готово': '✅'}.get(status, '📌')
 
-# ========== КЛАВИАТУРЫ (ПОЛНОСТЬЮ СОХРАНЕНЫ ОРИГИНАЛЬНЫЕ) ==========
+# ========== КЛАВИАТУРЫ ==========
 def get_main_menu():
-    """Главное меню (добавлена кнопка 'Мои заявки')"""
     buttons = [
         [InlineKeyboardButton("🆘 Создать заявку", callback_data="create")],
         [InlineKeyboardButton("📋 Мои заявки", callback_data="my_requests")],
@@ -136,7 +167,6 @@ def get_main_menu():
     return InlineKeyboardMarkup(buttons)
 
 def get_problems_menu():
-    """Меню выбора проблемы (оригинальное)"""
     buttons = [
         [InlineKeyboardButton("💻 Не включается", callback_data="problem_not_starting")],
         [InlineKeyboardButton("🖥️ Медленно работает", callback_data="problem_slow")],
@@ -149,8 +179,9 @@ def get_problems_menu():
     ]
     return InlineKeyboardMarkup(buttons)
 
-# ========== ХРАНЕНИЕ СОСТОЯНИЙ (ВРЕМЕННОЕ) ==========
-user_states = {}  # вместо user_data, чтобы не конфликтовать с БД
+# ========== ХРАНЕНИЕ СОСТОЯНИЙ ==========
+user_states = {}          # для обычных пользователей
+admin_states = {}         # для администратора (создание заявки, добавление комментария)
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -179,7 +210,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== АДМИН-ПАНЕЛЬ ==========
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Вход в админ-панель по команде /admin"""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ У вас нет прав для этой команды.")
         return
@@ -188,17 +218,18 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_admin_main_menu(message):
     text = "🔐 **Панель администратора**\n\nВыберите действие:"
+    # Добавлена кнопка "➕ Добавить заявку"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Все заявки", callback_data="admin_all")],
         [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("🆕 Новые", callback_data="admin_status_Новая")],
         [InlineKeyboardButton("⚙️ В работе", callback_data="admin_status_В работе")],
-        [InlineKeyboardButton("✅ Готово", callback_data="admin_status_Готово")]
+        [InlineKeyboardButton("✅ Готово", callback_data="admin_status_Готово")],
+        [InlineKeyboardButton("➕ Добавить заявку", callback_data="admin_add_request")]   # Новая кнопка
     ])
     await message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка всех кнопок админ-панели"""
     query = update.callback_query
     await query.answer()
 
@@ -208,21 +239,16 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     data = query.data
 
-    # ----- ВАЖНО: сначала проверяем изменение статуса -----
+    # ----- Изменение статуса (существующее) -----
     if data.startswith("admin_status_change_"):
-        # Разбираем callback: admin_status_change_<request_id>_<status>
-        # Используем split с ограничением, чтобы статус мог содержать пробелы
         parts = data.split("_", 4)
         if len(parts) < 5:
             await query.answer("Ошибка данных", show_alert=True)
             return
         request_id = int(parts[3])
-        new_status = parts[4]  # весь остаток после четвёртого подчёркивания
+        new_status = parts[4]
 
-        # Обновляем статус в БД
         update_request_status(request_id, new_status)
-
-        # Уведомляем клиента
         req = get_request_by_id(request_id)
         if req:
             try:
@@ -234,7 +260,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             except Exception as e:
                 logger.error(f"Не удалось уведомить клиента: {e}")
 
-        # Показываем обновлённую карточку заявки
         req = get_request_by_id(request_id)
         if req:
             text = (
@@ -253,7 +278,32 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text("❌ Заявка не найдена")
         return
 
-    # ----- Далее остальные админские обработчики -----
+    # ----- НОВОЕ: Добавление заявки администратором -----
+    if data == "admin_add_request":
+        admin_states[ADMIN_ID] = {"step": "add_request_name"}
+        await query.edit_message_text(
+            "👤 Введите **имя клиента** (как оно будет отображаться в заявке):",
+            parse_mode="Markdown"
+        )
+        return
+
+    # ----- НОВОЕ: Просмотр комментариев -----
+    if data.startswith("admin_comments_"):
+        request_id = int(data.split("_")[-1])
+        await show_comments(query, request_id)
+        return
+
+    # ----- НОВОЕ: Добавление комментария -----
+    if data.startswith("admin_add_comment_"):
+        request_id = int(data.split("_")[-1])
+        admin_states[ADMIN_ID] = {"step": "add_comment", "request_id": request_id}
+        await query.edit_message_text(
+            f"💬 Введите текст комментария для заявки №{request_id}:",
+            parse_mode="Markdown"
+        )
+        return
+
+    # ----- Далее остальные админские обработчики (существующие) -----
     if data == "admin_main":
         await show_admin_main_menu(query.message)
         return
@@ -279,13 +329,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await show_admin_requests_page(query, page, "all")
         return
 
-    # Просмотр по статусу (без пагинации)
     if data.startswith("admin_status_") and "_page_" not in data:
         status = data.replace("admin_status_", "")
         await show_admin_requests_page(query, 0, "status", status)
         return
 
-    # Просмотр по статусу с пагинацией
     if data.startswith("admin_status_") and "_page_" in data:
         parts = data.split("_page_")
         status = parts[0].replace("admin_status_", "")
@@ -353,7 +401,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if data == "admin_back_to_list":
-        # Просто показываем список всех заявок с первой страницы
         await show_admin_requests_page(query, 0, "all")
         return
 
@@ -373,9 +420,11 @@ def get_admin_manage_keyboard(request_id, current_status):
     if status_row:
         buttons.append(status_row)
 
+    # Добавлена кнопка "💬 Комментарии"
     buttons.append([
         InlineKeyboardButton("🗑 Удалить", callback_data=f"admin_delete_{request_id}"),
-        InlineKeyboardButton("📞 Контакты", callback_data=f"admin_contact_{request_id}")
+        InlineKeyboardButton("📞 Контакты", callback_data=f"admin_contact_{request_id}"),
+        InlineKeyboardButton("💬 Комментарии", callback_data=f"admin_comments_{request_id}")   # Новая кнопка
     ])
     buttons.append([InlineKeyboardButton("◀️ Назад к списку", callback_data="admin_back_to_list")])
     return InlineKeyboardMarkup(buttons)
@@ -409,14 +458,12 @@ async def show_admin_requests_page(query, page, filter_type, status=None):
         )
 
     buttons = []
-    # Кнопки для каждой заявки
     for req in requests_page:
         buttons.append([InlineKeyboardButton(
             f"🔧 Управлять №{req['id']}",
             callback_data=f"admin_manage_{req['id']}"
         )])
 
-    # Пагинация
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton("◀️", callback_data=f"{prefix}_page_{page-1}"))
@@ -428,9 +475,30 @@ async def show_admin_requests_page(query, page, filter_type, status=None):
     buttons.append([InlineKeyboardButton("🏠 Главное меню", callback_data="admin_main")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
-# ========== ОБРАБОТЧИКИ КЛИЕНТСКИХ КНОПОК ==========
+# ----- НОВАЯ функция: показать комментарии к заявке -----
+async def show_comments(query, request_id):
+    comments = get_comments(request_id)
+    req = get_request_by_id(request_id)
+    if not req:
+        await query.edit_message_text("❌ Заявка не найдена")
+        return
+
+    text = f"💬 **Комментарии к заявке №{request_id}**\n\n"
+    if not comments:
+        text += "Пока нет комментариев.\n"
+    else:
+        for c in comments:
+            date = c['created_at'][:16] if c['created_at'] else 'неизвестно'
+            text += f"[{date}] Админ {c['admin_id']}: {c['comment']}\n\n"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Добавить комментарий", callback_data=f"admin_add_comment_{request_id}")],
+        [InlineKeyboardButton("◀️ Назад к заявке", callback_data=f"admin_manage_{request_id}")]
+    ])
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
+# ========== ОБРАБОТЧИКИ КЛИЕНТСКИХ КНОПОК (без изменений) ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатий на кнопки главного меню (оригинальный + новые)"""
     query = update.callback_query
     await query.answer()
 
@@ -438,15 +506,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "back":
-        # Возврат в главное меню
         await query.edit_message_text(
             "📋 *Главное меню*\n\nВыберите нужное действие:",
             reply_markup=get_main_menu(),
             parse_mode="Markdown"
         )
-
     elif data == "create":
-        # Начать создание заявки
         user_states[user_id] = {"step": "select_problem"}
         await query.edit_message_text(
             "🛠️ *Выберите тип проблемы:*\n\n"
@@ -454,9 +519,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_problems_menu(),
             parse_mode="Markdown"
         )
-
     elif data.startswith("problem_"):
-        # Пользователь выбрал проблему
         problem_type = data.replace("problem_", "")
         problem_names = {
             "not_starting": "💻 Не включается",
@@ -469,13 +532,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         problem_name = problem_names.get(problem_type, "❓ Неизвестная проблема")
 
-        # Сохраняем проблему и переходим к запросу телефона
         user_states[user_id] = {
             "step": "enter_phone",
             "problem_type": problem_type,
             "problem_name": problem_name
         }
-
         await query.edit_message_text(
             f"✅ Выбрано: *{problem_name}*\n\n"
             "📞 *Укажите ваш номер телефона*\n\n"
@@ -485,7 +546,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• или просто 10-11 цифр",
             parse_mode="Markdown"
         )
-
     elif data == "contacts":
         await query.edit_message_text(
             "📞 *Контакты сервиса:*\n\n"
@@ -499,7 +559,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]]),
             parse_mode="Markdown"
         )
-
     elif data == "prices":
         await query.edit_message_text(
             "💰 *Наши цены:*\n\n"
@@ -524,9 +583,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]),
             parse_mode="Markdown"
         )
-
     elif data == "my_requests":
-        # Новая кнопка — показать заявки пользователя
         requests = get_user_requests(user_id)
         if not requests:
             await query.edit_message_text(
@@ -555,6 +612,91 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
 
+    # --- Приоритет: состояние администратора ---
+    if user_id == ADMIN_ID and user_id in admin_states:
+        state = admin_states[user_id]
+        step = state.get("step")
+
+        # Добавление заявки администратором
+        if step == "add_request_name":
+            state["client_name"] = text
+            state["step"] = "add_request_phone"
+            await update.message.reply_text("📞 Введите **номер телефона** клиента:")
+            return
+
+        elif step == "add_request_phone":
+            if not validate_phone(text):
+                await update.message.reply_text("❌ Неверный формат номера. Попробуйте ещё раз:")
+                return
+            state["phone"] = text
+            state["step"] = "add_request_problem_type"
+            # Показываем меню выбора проблемы
+            await update.message.reply_text(
+                "🛠️ Выберите **тип проблемы**:",
+                reply_markup=get_problems_menu()
+            )
+            return
+
+        elif step == "add_request_problem_type":
+            # Этот шаг обрабатывается через CallbackQueryHandler (выбор проблемы из меню)
+            # Поэтому здесь просто заглушка
+            await update.message.reply_text("Пожалуйста, выберите тип проблемы из меню.")
+            return
+
+        elif step == "add_request_description":
+            state["description"] = text
+            state["step"] = "add_request_user_id"
+            await update.message.reply_text(
+                "🆔 Введите **Telegram ID клиента** (число).\n"
+                "Если не знаете, можно ввести 0 (заявка не будет привязана к пользователю)."
+            )
+            return
+
+        elif step == "add_request_user_id":
+            try:
+                target_user_id = int(text)
+            except ValueError:
+                await update.message.reply_text("❌ Введите число (ID пользователя).")
+                return
+
+            # Создаём заявку
+            try:
+                request_id = add_request(
+                    user_id=target_user_id,
+                    username=None,  # мы не знаем username
+                    client_name=state["client_name"],
+                    phone=state["phone"],
+                    problem_type=state["problem_name"],
+                    problem_description=state["description"]
+                )
+                logger.info(f"✅ Заявка #{request_id} создана администратором")
+
+                await update.message.reply_text(
+                    f"✅ Заявка №{request_id} успешно создана!",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data="admin_main")]])
+                )
+            except Exception as e:
+                logger.error(f"Ошибка создания заявки администратором: {e}")
+                await update.message.reply_text("❌ Ошибка при создании заявки.")
+            finally:
+                del admin_states[user_id]
+            return
+
+        # Добавление комментария
+        elif step == "add_comment":
+            request_id = state["request_id"]
+            add_comment(request_id, user_id, text)
+            await update.message.reply_text("✅ Комментарий добавлен.")
+            # Показываем обновлённые комментарии
+            await show_comments(await update.message.reply_text("Обновляем..."), request_id)
+            del admin_states[user_id]
+            return
+
+        # Если неизвестный шаг — очищаем состояние
+        else:
+            del admin_states[user_id]
+
+    # --- Обычный пользователь или администратор без состояния ---
     if user_id not in user_states:
         await update.message.reply_text(
             "Пожалуйста, используйте кнопки меню.",
@@ -566,7 +708,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = state.get("step")
 
     if step == "enter_phone":
-        # Проверяем телефон
         if not validate_phone(text):
             await update.message.reply_text(
                 "❌ *Неверный формат номера*\n\n"
@@ -575,7 +716,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Сохраняем телефон и переходим к описанию
         state["phone"] = text
         state["step"] = "enter_description"
         await update.message.reply_text(
@@ -588,12 +728,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif step == "enter_description":
-        # Сохраняем описание
         description = text
         phone = state["phone"]
         problem_name = state["problem_name"]
 
-        # Сохраняем в базу данных
         try:
             request_id = add_request(
                 user_id=user_id,
@@ -605,7 +743,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             logger.info(f"✅ Заявка #{request_id} сохранена")
 
-            # Отправляем подтверждение пользователю
             user_request_text = f"""📋 *ВАША ЗАЯВКА ПРИНЯТА*
 
 🔧 *Проблема:* {problem_name}
@@ -630,14 +767,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             await asyncio.sleep(1)
-            # ФИНАЛЬНОЕ СООБЩЕНИЕ С ГЛАВНЫМ МЕНЮ (ИСПРАВЛЕНО)
             await update.message.reply_text(
                 user_request_text,
                 parse_mode="Markdown",
-                reply_markup=get_main_menu()   # ← добавлено
+                reply_markup=get_main_menu()
             )
 
-            # Отправляем админу
             if ADMIN_ID:
                 admin_text = f"""🎯 *НОВАЯ ЗАЯВКА НА РЕМОНТ!*
 
@@ -672,8 +807,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_main_menu()
             )
 
-        # Очищаем состояние
         del user_states[user_id]
+
+    else:
+        await update.message.reply_text(
+            "Пожалуйста, используйте кнопки меню.",
+            reply_markup=get_main_menu()
+        )
 
 # ========== ЗАПУСК ==========
 def main():
@@ -695,7 +835,7 @@ def main():
     # Текстовые сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    logger.info("🚀 Бот запущен")
+    logger.info("🚀 Бот запущен (с функциями админа: добавление заявок и комментарии)")
     app.run_polling()
 
 if __name__ == "__main__":
